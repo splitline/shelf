@@ -1,0 +1,177 @@
+name: Confluence backend research artifact acquisition
+
+on:
+  push:
+    branches:
+      - research/confluence-10.2.15-acquire
+    paths:
+      - .github/workflows/confluence-backend-research.yml
+      - tools/confluence-research/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: confluence-backend-research
+  cancel-in-progress: true
+
+jobs:
+  acquire:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      CURRENT_VERSION: "10.2.15"
+      PREVIOUS_VERSION: "10.2.14"
+    steps:
+      - name: Check out the temporary research branch
+        uses: actions/checkout@v4
+
+      - name: Acquire official distributions and encrypt them
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          ROOT="$RUNNER_TEMP/confluence-research"
+          PLAIN="$ROOT/plain"
+          ENCRYPTED="$ROOT/encrypted"
+          mkdir -p "$PLAIN" "$ENCRYPTED"
+
+          cert="tools/confluence-research/recipient-cert.pem"
+          openssl x509 -in "$cert" -noout -subject -fingerprint -sha256
+
+          acquire_version() {
+            local version="$1"
+            local work="$ROOT/work-$version"
+            local raw="$work/rootfs"
+            local archive="$work/atlassian-confluence-$version.tar.gz"
+            local source_file="$work/acquisition-source.txt"
+            mkdir -p "$raw"
+
+            local acquired=""
+            local url=""
+            for url in \
+              "https://www.atlassian.com/software/confluence/downloads/binary/atlassian-confluence-$version.tar.gz" \
+              "https://product-downloads.atlassian.com/software/confluence/downloads/atlassian-confluence-$version.tar.gz" \
+              "https://downloads.atlassian.com/software/confluence/downloads/atlassian-confluence-$version.tar.gz"
+            do
+              rm -f "$archive"
+              if curl --fail --silent --show-error --location \
+                   --retry 5 --retry-all-errors --connect-timeout 30 \
+                   --output "$archive" "$url" \
+                 && tar -tzf "$archive" >/dev/null 2>&1; then
+                tar -xzf "$archive" -C "$raw"
+                printf 'archive\n%s\n' "$url" > "$source_file"
+                acquired="archive"
+                break
+              fi
+            done
+
+            if [[ -z "$acquired" ]]; then
+              local tag=""
+              local image=""
+              local cid=""
+              for tag in \
+                "$version-ubuntu-jdk21" \
+                "$version-jdk21" \
+                "$version"
+              do
+                image="atlassian/confluence:$tag"
+                if docker pull --quiet "$image" >/dev/null; then
+                  cid="$(docker create "$image")"
+                  docker export "$cid" | tar -xf - -C "$raw"
+                  docker rm "$cid" >/dev/null
+                  {
+                    printf 'docker\n%s\n' "$image"
+                    docker image inspect "$image" --format '{{json .RepoDigests}}'
+                    docker image inspect "$image" --format '{{json .Id}}'
+                  } > "$source_file"
+                  acquired="docker"
+                  docker image rm "$image" >/dev/null 2>&1 || true
+                  break
+                fi
+              done
+            fi
+
+            if [[ -z "$acquired" ]]; then
+              echo "Could not acquire Confluence $version from official archive URLs or official Docker Hub image" >&2
+              exit 20
+            fi
+
+            local libdir=""
+            libdir="$(find "$raw" -type d -path '*/confluence/WEB-INF/lib' -print -quit)"
+            if [[ -z "$libdir" ]]; then
+              echo "Confluence WEB-INF/lib landmark not found for $version" >&2
+              find "$raw" -maxdepth 6 -type d -print | head -200 >&2
+              exit 21
+            fi
+
+            local appdir=""
+            local install=""
+            appdir="$(dirname "$(dirname "$libdir")")"
+            install="$(dirname "$appdir")"
+
+            if ! find "$libdir" -maxdepth 1 -type f -name 'confluence-*.jar' -print -quit | grep -q .; then
+              echo "Confluence main JAR landmark not found for $version" >&2
+              exit 22
+            fi
+            if [[ ! -f "$appdir/WEB-INF/web.xml" ]]; then
+              echo "web.xml landmark not found for $version" >&2
+              exit 23
+            fi
+
+            local meta="$work/metadata"
+            mkdir -p "$meta"
+            cp "$source_file" "$meta/acquisition-source.txt"
+            printf '%s\n' "$version" > "$meta/requested-version.txt"
+            printf '%s\n' "$install" > "$meta/install-path.txt"
+            printf '%s\n' "$appdir" > "$meta/application-path.txt"
+            if [[ -s "$archive" ]]; then
+              sha256sum "$archive" > "$meta/source-archive.sha256"
+              stat --printf='%s\n' "$archive" > "$meta/source-archive.size"
+            fi
+
+            find "$install" -type f -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum > "$meta/install-files.sha256"
+            find "$install" -type f -printf '%s\t%p\n' \
+              | LC_ALL=C sort -n > "$meta/install-files.tsv"
+            find "$install" -type f \( -name '*.jar' -o -name '*.war' -o -name '*.ear' \) \
+              -printf '%s\t%p\n' | LC_ALL=C sort > "$meta/java-archives.tsv"
+
+            local package="$PLAIN/confluence-$version-install-and-metadata.tar.gz"
+            tar -C "$(dirname "$install")" -czf "$package" \
+              "$(basename "$install")" \
+              -C "$work" metadata
+
+            openssl cms -encrypt -binary -aes256 \
+              -in "$package" \
+              -out "$ENCRYPTED/$(basename "$package").cms" \
+              -outform DER \
+              "$cert"
+
+            sha256sum "$package" > "$PLAIN/$(basename "$package").sha256"
+            openssl cms -encrypt -binary -aes256 \
+              -in "$PLAIN/$(basename "$package").sha256" \
+              -out "$ENCRYPTED/$(basename "$package").sha256.cms" \
+              -outform DER \
+              "$cert"
+
+            rm -rf "$work" "$package" "$PLAIN/$(basename "$package").sha256"
+          }
+
+          acquire_version "$CURRENT_VERSION"
+          acquire_version "$PREVIOUS_VERSION"
+
+          sha256sum "$ENCRYPTED"/* > "$ENCRYPTED/SHA256SUMS"
+          ls -lh "$ENCRYPTED"
+
+      - name: Upload encrypted research artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-and-10.2.14-encrypted
+          path: ${{ runner.temp }}/confluence-research/encrypted/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
