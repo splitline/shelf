@@ -33,7 +33,7 @@ jobs:
       - name: Check out the temporary research branch
         uses: actions/checkout@v4
 
-      - name: Acquire official distributions and encrypt them
+      - name: Acquire official distributions, encrypt, and split
         shell: bash
         run: |
           set -euo pipefail
@@ -42,7 +42,10 @@ jobs:
           ROOT="$RUNNER_TEMP/confluence-research"
           PLAIN="$ROOT/plain"
           ENCRYPTED="$ROOT/encrypted"
-          mkdir -p "$PLAIN" "$ENCRYPTED"
+          EXPORT="$GITHUB_WORKSPACE/.confluence-artifacts"
+          CHUNKS="$EXPORT/chunks"
+          META="$EXPORT/metadata"
+          mkdir -p "$PLAIN" "$ENCRYPTED" "$CHUNKS" "$META"
 
           cert="tools/confluence-research/recipient-cert.pem"
           openssl x509 -in "$cert" -noout -subject -fingerprint -sha256
@@ -153,33 +156,122 @@ jobs:
               "$(basename "$install")" \
               -C "$work" metadata
 
+            local encrypted="$ENCRYPTED/$(basename "$package").cms"
             openssl cms -encrypt -binary -aes256 \
-              -in "$package" \
-              -out "$ENCRYPTED/$(basename "$package").cms" \
-              -outform DER \
-              "$cert"
+              -in "$package" -out "$encrypted" -outform DER "$cert"
 
             sha256sum "$package" > "$PLAIN/$(basename "$package").sha256"
             openssl cms -encrypt -binary -aes256 \
               -in "$PLAIN/$(basename "$package").sha256" \
-              -out "$ENCRYPTED/$(basename "$package").sha256.cms" \
-              -outform DER \
-              "$cert"
+              -out "$META/$(basename "$package").sha256.cms" \
+              -outform DER "$cert"
 
-            rm -rf "$work" "$package" "$PLAIN/$(basename "$package").sha256"
+            split -b 300000000 -d -a 2 \
+              "$encrypted" "$CHUNKS/$(basename "$encrypted").part-"
+
+            rm -rf "$work" "$package" "$PLAIN/$(basename "$package").sha256" "$encrypted"
           }
 
           acquire_version "$CURRENT_VERSION"
           acquire_version "$PREVIOUS_VERSION"
 
-          sha256sum "$ENCRYPTED"/* > "$ENCRYPTED/SHA256SUMS"
-          ls -lh "$ENCRYPTED"
+          sha256sum "$CHUNKS"/* > "$META/chunk-SHA256SUMS"
+          find "$CHUNKS" -maxdepth 1 -type f -printf '%f\t%s\n' \
+            | LC_ALL=C sort > "$META/chunk-sizes.tsv"
+          cat > "$META/reconstruct.txt" <<'EOF'
+          Verify chunk-SHA256SUMS, concatenate parts in lexical order for each version,
+          then decrypt with: openssl cms -decrypt -binary -inform DER -in FILE.cms \
+          -recip cert.pem -inkey private.pem -out FILE.tar.gz
+          EOF
+          ls -lh "$CHUNKS" "$META"
 
-      - name: Upload encrypted research artifacts
+      - name: Upload encrypted metadata
         uses: actions/upload-artifact@v4
         with:
-          name: confluence-10.2.15-and-10.2.14-encrypted
-          path: ${{ runner.temp }}/confluence-research/encrypted/*
+          name: confluence-encrypted-metadata
+          path: .confluence-artifacts/metadata/*
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload current part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-part-00
+          path: .confluence-artifacts/chunks/confluence-10.2.15-install-and-metadata.tar.gz.cms.part-00
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload current part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-part-01
+          path: .confluence-artifacts/chunks/confluence-10.2.15-install-and-metadata.tar.gz.cms.part-01
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+      - name: Upload current part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-part-02
+          path: .confluence-artifacts/chunks/confluence-10.2.15-install-and-metadata.tar.gz.cms.part-02
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+      - name: Upload current part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-part-03
+          path: .confluence-artifacts/chunks/confluence-10.2.15-install-and-metadata.tar.gz.cms.part-03
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+      - name: Upload current part 04
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-part-04
+          path: .confluence-artifacts/chunks/confluence-10.2.15-install-and-metadata.tar.gz.cms.part-04
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload previous part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.14-part-00
+          path: .confluence-artifacts/chunks/confluence-10.2.14-install-and-metadata.tar.gz.cms.part-00
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload previous part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.14-part-01
+          path: .confluence-artifacts/chunks/confluence-10.2.14-install-and-metadata.tar.gz.cms.part-01
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+      - name: Upload previous part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.14-part-02
+          path: .confluence-artifacts/chunks/confluence-10.2.14-install-and-metadata.tar.gz.cms.part-02
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+      - name: Upload previous part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.14-part-03
+          path: .confluence-artifacts/chunks/confluence-10.2.14-install-and-metadata.tar.gz.cms.part-03
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+      - name: Upload previous part 04
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.14-part-04
+          path: .confluence-artifacts/chunks/confluence-10.2.14-install-and-metadata.tar.gz.cms.part-04
+          if-no-files-found: ignore
           compression-level: 0
           retention-days: 1
