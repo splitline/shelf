@@ -118,13 +118,13 @@ jobs:
             appdir="$(dirname "$(dirname "$libdir")")"
             install="$(dirname "$appdir")"
 
-            if ! find "$libdir" -maxdepth 1 -type f -name 'confluence-*.jar' -print -quit | grep -q .; then
-              echo "Confluence main JAR landmark not found for $version" >&2
-              exit 22
-            fi
             if [[ ! -f "$appdir/WEB-INF/web.xml" ]]; then
               echo "web.xml landmark not found for $version" >&2
               exit 23
+            fi
+            if ! find "$libdir" -maxdepth 1 -type f -name '*.jar' -print -quit | grep -q .; then
+              echo "No Java archives found in WEB-INF/lib for $version" >&2
+              exit 24
             fi
 
             local meta="$work/metadata"
@@ -138,6 +138,8 @@ jobs:
               stat --printf='%s\n' "$archive" > "$meta/source-archive.size"
             fi
 
+            find "$libdir" -maxdepth 1 -type f -name '*.jar' -printf '%f\n' \
+              | LC_ALL=C sort > "$meta/web-inf-lib-jars.txt"
             find "$install" -type f -print0 \
               | LC_ALL=C sort -z \
               | xargs -0 sha256sum > "$meta/install-files.sha256"
