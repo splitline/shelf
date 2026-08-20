@@ -7,13 +7,19 @@ on:
     paths:
       - .github/workflows/confluence-backend-research.yml
       - tools/confluence-research/**
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/confluence-backend-research.yml
+      - tools/confluence-research/**
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: confluence-backend-research
+  group: confluence-backend-research-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
