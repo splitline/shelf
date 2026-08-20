@@ -1,0 +1,76 @@
+name: Confluence 10.2.15 dependency scan
+
+on:
+  push:
+    branches:
+      - research/confluence-10.2.15-acquire
+    paths:
+      - .github/workflows/confluence-dependency-scan.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download official Confluence distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=10.2.15
+          ROOT="$RUNNER_TEMP/confluence-dependency-scan"
+          mkdir -p "$ROOT/install" "$ROOT/tools" "$ROOT/reports"
+          URL="https://www.atlassian.com/software/confluence/downloads/binary/atlassian-confluence-$VERSION.tar.gz"
+          curl --fail --location --retry 5 --retry-all-errors --output "$ROOT/confluence.tar.gz" "$URL"
+          tar -tzf "$ROOT/confluence.tar.gz" >/dev/null
+          tar -xzf "$ROOT/confluence.tar.gz" -C "$ROOT/install"
+          sha256sum "$ROOT/confluence.tar.gz" > "$ROOT/reports/source-archive.sha256"
+          printf '%s\n' "$URL" > "$ROOT/reports/source-url.txt"
+      - name: Install exact Syft and Grype releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/confluence-dependency-scan"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "$ROOT/tools"
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b "$ROOT/tools"
+          "$ROOT/tools/syft" version > "$ROOT/reports/syft-version.txt"
+          "$ROOT/tools/grype" version > "$ROOT/reports/grype-version.txt"
+          sha256sum "$ROOT/tools/syft" "$ROOT/tools/grype" > "$ROOT/reports/tool-binaries.sha256"
+      - name: Build SBOM and vulnerability report
+        shell: bash
+        env:
+          GRYPE_DB_AUTO_UPDATE: "true"
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/confluence-dependency-scan"
+          INSTALL="$(find "$ROOT/install" -maxdepth 1 -type d -name 'atlassian-confluence-*' -print -quit)"
+          test -n "$INSTALL"
+          "$ROOT/tools/syft" "dir:$INSTALL" -o syft-json="$ROOT/reports/sbom.syft.json" -o cyclonedx-json="$ROOT/reports/sbom.cyclonedx.json"
+          "$ROOT/tools/grype" "sbom:$ROOT/reports/sbom.syft.json" -o json > "$ROOT/reports/grype.json"
+          "$ROOT/tools/grype" "sbom:$ROOT/reports/sbom.syft.json" -o table > "$ROOT/reports/grype.txt"
+          sha256sum "$ROOT/reports"/* > "$ROOT/reports/SHA256SUMS"
+      - name: Encrypt reports to the temporary local research certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/confluence-dependency-scan"
+          tar -C "$ROOT" -czf "$ROOT/dependency-reports.tar.gz" reports
+          openssl cms -encrypt -binary -aes256 \
+            -in "$ROOT/dependency-reports.tar.gz" \
+            -out "$ROOT/dependency-reports.tar.gz.cms" \
+            -outform DER \
+            tools/confluence-research/recipient-cert.pem
+          sha256sum "$ROOT/dependency-reports.tar.gz.cms" > "$ROOT/dependency-reports.tar.gz.cms.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: confluence-10.2.15-dependency-reports-encrypted
+          path: |
+            ${{ runner.temp }}/confluence-dependency-scan/dependency-reports.tar.gz.cms
+            ${{ runner.temp }}/confluence-dependency-scan/dependency-reports.tar.gz.cms.sha256
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
